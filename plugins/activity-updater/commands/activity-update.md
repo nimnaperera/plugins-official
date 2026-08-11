@@ -69,9 +69,10 @@ git submodule update --init --remote
 The repo contains a `nuget.config` with placeholder tokens for a private feed. Inject credentials from environment before building. This modified file is needed for both build and test — do not restore it until just before committing.
 
 ```bash
-sed -i "s/%NUGET_SP_CLIENT_ID%/$(printenv 'NUGET-SP-CLIENT-ID')/g" nuget.config
-sed -i "s/%NUGET_SP_PASSWORD%/$(printenv 'AZURE-DEVOPS-TOKEN')/g" nuget.config
-cat nuget.config
+NUGET_CONFIG=$(find . -name "nuget.config" | head -1)
+sed -i "s/%NUGET_SP_CLIENT_ID%/$(printenv 'NUGET-SP-CLIENT-ID')/g" "$NUGET_CONFIG"
+sed -i "s/%NUGET_SP_PASSWORD%/$(printenv 'AZURE-DEVOPS-TOKEN')/g" "$NUGET_CONFIG"
+cat "$NUGET_CONFIG"
 ```
 
 **The modified `nuget.config` must never be committed or pushed — it contains live credentials.**
@@ -104,7 +105,7 @@ dotnet test --no-build 2>&1
 Restore `nuget.config` to its original state before staging — credentials must not be committed:
 
 ```bash
-git checkout -- nuget.config
+git checkout -- "$NUGET_CONFIG"
 git add -A
 git commit -m "chore: update ams-activity-base submodule
 
