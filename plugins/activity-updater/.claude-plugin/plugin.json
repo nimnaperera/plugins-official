@@ -1,0 +1,12 @@
+{
+  "name": "activity-updater",
+  "version": "1.0.0",
+  "description": "Propagates ams-activity-base submodule changes across all registered activity services. Updates submodules, iterates build/fix cycles, creates PRs, and posts Slack notifications.",
+  "author": {
+    "name": "Amili SEND",
+    "email": "support.send@amili.no"
+  },
+  "license": "MIT",
+  "keywords": ["submodule", "activity-base", "dotnet", "azure-devops", "automation"],
+  "commands": ["./commands/activity-update.md"]
+}
