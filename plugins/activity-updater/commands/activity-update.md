@@ -14,7 +14,7 @@ These are hardcoded. Add or remove entries here to change coverage. Do NOT inclu
 
 ```json
 [
-  { "name": "ams-activity-deliver-print", "url": "https://compello@dev.azure.com/compello/Send%20-%20Azure/_git/ams-activity-deliver-print" }
+  { "name": "ams-activity-zip-extractor", "url": "https://compello@dev.azure.com/compello/Send%20-%20Azure/_git/ams-activity-zip-extractor" }
 ]
 ```
 
