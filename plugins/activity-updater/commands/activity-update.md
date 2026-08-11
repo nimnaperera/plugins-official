@@ -71,6 +71,7 @@ The repo contains a `nuget.config` with placeholder tokens for a private feed. I
 ```bash
 sed -i "s/%NUGET_SP_CLIENT_ID%/$(printenv 'NUGET-SP-CLIENT-ID')/g" nuget.config
 sed -i "s/%NUGET_SP_PASSWORD%/$(printenv 'AZURE-DEVOPS-TOKEN')/g" nuget.config
+cat nuget.config
 ```
 
 **The modified `nuget.config` must never be committed or pushed — it contains live credentials.**
