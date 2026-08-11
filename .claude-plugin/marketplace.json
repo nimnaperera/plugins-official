@@ -19,8 +19,8 @@
         "name": "Amili SEND",
         "email": "support.send@amili.no"
       },
-      "homepage": "https://github.com/nimnaperera/ams-plugins",
-      "repository": "https://github.com/nimnaperera/ams-plugins",
+      "homepage": "https://github.com/nimnaperera/plugins-official",
+      "repository": "https://github.com/nimnaperera/plugins-official",
       "category": "automation",
       "keywords": ["submodule", "activity-base", "dotnet", "azure-devops", "slack", "automation"],
       "license": "MIT"

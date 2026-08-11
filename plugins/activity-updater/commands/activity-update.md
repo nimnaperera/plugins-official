@@ -39,7 +39,7 @@ Merged by: <merged-by>
 
 ## Per-Activity Process
 
-Repeat all steps A–I for each entry in the list above.
+Repeat all steps A–J for each entry in the list above.
 
 ### A. Clone
 
@@ -59,24 +59,43 @@ git checkout -b feat/activity-base-<short-sha>
 ### C. Update submodule
 
 ```bash
-git submodule update --init --remote --merge
+git submodule update --init --remote
 ```
 
 **On failure** → Slack: `❌ <name>: submodule update failed — <error-summary>. Skipped.` → `rm -rf /tmp/<name>` → next activity.
 
-### D. Build + fix loop
+### D. Configure NuGet credentials
+
+The repo contains a `nuget.config` with placeholder tokens for a private feed. Inject credentials from environment before building. This modified file is needed for both build and test — do not restore it until just before committing.
 
 ```bash
-dotnet build 2>&1
+sed -i "s/%NUGET_SP_CLIENT_ID%/$(printenv 'NUGET-SP-CLIENT-ID')/g" nuget.config
+sed -i "s/%NUGET_SP_PASSWORD%/$(printenv 'AZURE-DEVOPS-TOKEN')/g" nuget.config
 ```
 
-- Exit 0 → proceed to E.
+**The modified `nuget.config` must never be committed or pushed — it contains live credentials.**
+
+Then run restore:
+
+```bash
+dotnet restore 2>&1
+```
+
+If restore fails → set `build_failed=true`, record error, skip to G (restore `nuget.config` and commit the submodule-only change, then continue from H).
+
+### E. Build + fix loop
+
+```bash
+dotnet build -c "Release" /p:AzureBuild=true 2>&1
+```
+
+- Exit 0 → proceed to F.
 - Non-zero → read compiler output. Fix only what the errors explicitly require. Do not refactor unrelated code. Re-run build. Repeat.
-- After **5 total attempts** still failing → set `build_failed=true`, record the final error summary, continue to F.
+- After **5 total attempts** still failing → set `build_failed=true`, record the final error summary, continue to G.
 
 Track every file changed and every error class fixed. Include in PR description.
 
-### E. Tests (only when `build_failed` is false)
+### F. Tests (only when `build_failed` is false)
 
 ```bash
 dotnet test --no-build 2>&1
@@ -84,11 +103,14 @@ dotnet test --no-build 2>&1
 
 - Pass → continue.
 - Fail → fix failing tests, re-run. Max **3 total attempts**.
-- Still failing → set `tests_failed=true`, record summary, continue to F.
+- Still failing → set `tests_failed=true`, record summary, continue to G.
 
-### F. Stage and commit
+### G. Stage and commit
+
+Restore `nuget.config` to its original state before staging — credentials must not be committed:
 
 ```bash
+git checkout -- nuget.config
 git add -A
 git commit -m "chore: update ams-activity-base submodule
 
@@ -97,7 +119,7 @@ Submodule commit: <commit-id>
 Merged by: <merged-by>"
 ```
 
-### G. Push
+### H. Push
 
 ```bash
 git push origin feat/activity-base-<short-sha>
@@ -105,28 +127,41 @@ git push origin feat/activity-base-<short-sha>
 
 **On failure** → Slack: `❌ <name>: push failed — <error-summary>. No PR created.` → `rm -rf /tmp/<name>` → next activity.
 
-### H. Create PR
+### I. Create PR via ADO REST API
+
+Do NOT use `az` CLI — it is not authenticated in this container. Use the PAT from `AZURE-DEVOPS-TOKEN` directly.
 
 ```bash
-az repos pr create \
-  --org "<ado-org-url>" \
-  --project "<ado-project>" \
-  --repository "<name>" \
-  --source-branch "feat/activity-base-<short-sha>" \
-  --target-branch "main" \
-  --title "chore: update ams-activity-base submodule (#<pr-id>)" \
-  --description "<generated-description>"
+TOKEN=$(printenv 'AZURE-DEVOPS-TOKEN')
+PROJECT_ENCODED=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "<ado-project>")
+API_URL="<ado-org-url>/${PROJECT_ENCODED}/_apis/git/repositories/<name>/pullrequests?api-version=7.1"
+
+PR_RESPONSE=$(curl -s -X POST "$API_URL" \
+  -H "Authorization: Basic $(printf ':%s' "$TOKEN" | base64 -w 0)" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "chore: update ams-activity-base submodule (#<pr-id>)",
+    "description": "<generated-description>",
+    "sourceRefName": "refs/heads/feat/activity-base-<short-sha>",
+    "targetRefName": "refs/heads/main"
+  }')
+
+PR_WEB_URL=$(echo "$PR_RESPONSE" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(d.get('_links', {}).get('web', {}).get('href', ''))
+")
 ```
 
-PR description must include:
+If `PR_WEB_URL` is empty, the call failed — extract `d['message']` from the response, send Slack error with it, skip to clean up.
+
+The generated description must include:
 - What changed in ams-activity-base (PR title + ID)
 - Build status: succeeded / failed after N attempts (list error classes if failed)
 - Test status: passed / failed / skipped (reason)
 - Files modified by the agent (if any)
 
-Capture the PR web URL from the command output.
-
-### I. Slack notification + clean up
+### J. Slack notification + clean up
 
 Send one message per activity:
 
@@ -139,7 +174,7 @@ Send one message per activity:
 ```bash
 curl -s -X POST "$SLACK_WEBHOOK_URL" \
   -H 'Content-type: application/json' \
-  -d "{\"pr_url\":\"<pr-url>\",\"msg\":\"<message>\"}"
+  -d "{\"pr_url\":\"$PR_WEB_URL\",\"msg\":\"<message>\"}"
 
 rm -rf /tmp/<name>
 ```
