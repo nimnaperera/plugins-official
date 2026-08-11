@@ -172,9 +172,14 @@ Send one message per activity:
 | Build ⚠️ (PR created anyway) | `⚠️ <name>: Activity Base update PR created — build failures, manual fixes needed` |
 
 ```bash
-curl -s -X POST "$(printenv 'SLACK-WEBHOOK-URL')" \
+SLACK_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$(printenv 'SLACK-WEBHOOK-URL')" \
   -H 'Content-type: application/json' \
-  -d "{\"pr_url\":\"$PR_WEB_URL\",\"msg\":\"<message>\"}"
+  -d "{\"pr_url\":\"$PR_WEB_URL\",\"msg\":\"<message>\"}")
+if [ "$SLACK_STATUS" = "200" ]; then
+  echo "Slack notification sent for <name>."
+else
+  echo "Slack notification failed for <name> (HTTP $SLACK_STATUS)."
+fi
 
 rm -rf /tmp/<name>
 ```
@@ -184,7 +189,12 @@ rm -rf /tmp/<name>
 After all activities, send one summary message:
 
 ```bash
-curl -s -X POST "$(printenv 'SLACK-WEBHOOK-URL')" \
+SLACK_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$(printenv 'SLACK-WEBHOOK-URL')" \
   -H 'Content-type: application/json' \
-  -d "{\"msg\":\"*Activity-base update complete*\nTriggered by PR #<pr-id>: <pr-title>\n• ✅ <n-success> succeeded\n• ⚠️ <n-issues> PRs with issues\n• ❌ <n-skipped> skipped\"}"
+  -d "{\"msg\":\"*Activity-base update complete*\nTriggered by PR #<pr-id>: <pr-title>\n• ✅ <n-success> succeeded\n• ⚠️ <n-issues> PRs with issues\n• ❌ <n-skipped> skipped\"}")
+if [ "$SLACK_STATUS" = "200" ]; then
+  echo "Slack summary sent."
+else
+  echo "Slack summary failed (HTTP $SLACK_STATUS)."
+fi
 ```
