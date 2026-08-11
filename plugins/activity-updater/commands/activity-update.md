@@ -75,18 +75,11 @@ sed -i "s/%NUGET_SP_PASSWORD%/$(printenv 'AZURE-DEVOPS-TOKEN')/g" nuget.config
 
 **The modified `nuget.config` must never be committed or pushed — it contains live credentials.**
 
-Then run restore:
-
-```bash
-dotnet restore 2>&1
-```
-
-If restore fails → set `build_failed=true`, record error, skip to G (restore `nuget.config` and commit the submodule-only change, then continue from H).
-
 ### E. Build + fix loop
 
 ```bash
-dotnet build -c "Release" /p:AzureBuild=true 2>&1
+SLNX_FILE=$(find . -maxdepth 1 -name "*.slnx" | head -1)
+dotnet build "$SLNX_FILE" -c "Release" /p:AzureBuild=true 2>&1
 ```
 
 - Exit 0 → proceed to F.
