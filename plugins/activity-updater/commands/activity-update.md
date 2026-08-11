@@ -172,7 +172,7 @@ Send one message per activity:
 | Build ⚠️ (PR created anyway) | `⚠️ <name>: Activity Base update PR created — build failures, manual fixes needed` |
 
 ```bash
-curl -s -X POST "$SLACK_WEBHOOK_URL" \
+curl -s -X POST "$(printenv 'SLACK-WEBHOOK-URL')" \
   -H 'Content-type: application/json' \
   -d "{\"pr_url\":\"$PR_WEB_URL\",\"msg\":\"<message>\"}"
 
@@ -184,7 +184,7 @@ rm -rf /tmp/<name>
 After all activities, send one summary message:
 
 ```bash
-curl -s -X POST "$SLACK_WEBHOOK_URL" \
+curl -s -X POST "$(printenv 'SLACK-WEBHOOK-URL')" \
   -H 'Content-type: application/json' \
   -d "{\"msg\":\"*Activity-base update complete*\nTriggered by PR #<pr-id>: <pr-title>\n• ✅ <n-success> succeeded\n• ⚠️ <n-issues> PRs with issues\n• ❌ <n-skipped> skipped\"}"
 ```
