@@ -1,6 +1,6 @@
 {
   "name": "activity-updater",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "description": "Propagates ams-activity-base submodule changes across all registered activity services. Updates submodules, fixes build errors (up to 10 retries), fixes/writes tests, creates ADO PRs, and posts Slack notifications.",
   "author": {
     "name": "Amili SEND",

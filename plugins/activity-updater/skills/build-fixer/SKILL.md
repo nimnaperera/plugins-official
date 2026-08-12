@@ -26,26 +26,33 @@ Use Python3 (handles special characters safely — do NOT use sed):
 ```bash
 cd <working-directory>
 python3 << 'PYEOF'
-import os, subprocess
+import os, sys
+from pathlib import Path
 
-result = subprocess.run(
-    ["find", ".", "-name", "nuget.config", "-not", "-path", "*/.git/*"],
-    capture_output=True, text=True
-)
-cfg = result.stdout.strip().split("\n")[0]
-if not cfg:
-    print("ERROR: nuget.config not found"); exit(1)
+cfgs = [p for p in Path(".").rglob("nuget.config") if ".git" not in p.parts]
+if not cfgs:
+    sys.exit("ERROR: nuget.config not found")
 
 client_id = os.environ.get("NUGET-SP-CLIENT-ID", "")
 token     = os.environ.get("AZURE-DEVOPS-TOKEN", "")
 if not client_id or not token:
-    print("ERROR: NUGET-SP-CLIENT-ID or AZURE-DEVOPS-TOKEN not set"); exit(1)
+    sys.exit("ERROR: NUGET-SP-CLIENT-ID or AZURE-DEVOPS-TOKEN not set")
 
-with open(cfg) as f: content = f.read()
-content = content.replace("%NUGET_SP_CLIENT_ID%", client_id)
-content = content.replace("%NUGET_SP_PASSWORD%", token)
-with open(cfg, "w") as f: f.write(content)
-print(f"Credentials injected into {cfg}")
+injected = 0
+for cfg in cfgs:
+    content = cfg.read_text()
+    if "%NUGET_SP_CLIENT_ID%" not in content and "%NUGET_SP_PASSWORD%" not in content:
+        print(f"Skipped {cfg} — no placeholders")
+        continue
+    content = content.replace("%NUGET_SP_CLIENT_ID%", client_id)
+    content = content.replace("%NUGET_SP_PASSWORD%", token)
+    cfg.write_text(content)
+    print(f"Credentials injected into {cfg}")
+    injected += 1
+
+if injected == 0:
+    sys.exit("ERROR: no nuget.config contained credential placeholders")
+print(f"Injected into {injected} file(s)")
 PYEOF
 ```
 
@@ -57,7 +64,7 @@ If this fails → return:
 ## Step 2 — dotnet restore
 
 ```bash
-dotnet restore "<solution-file>" 2>&1
+dotnet restore "<solution-file>" -p:Platform="Any CPU" 2>&1
 ```
 
 If exit code non-zero → return:
@@ -68,7 +75,7 @@ If exit code non-zero → return:
 ## Step 3 — Build + fix loop (hard cap: 10 attempts)
 
 ```bash
-dotnet build "<solution-file>" -c Release /p:AzureBuild=true 2>&1
+dotnet build "<solution-file>" -c Release -p:Platform="Any CPU" /p:AzureBuild=true 2>&1
 ```
 
 **On success** (exit 0): return success JSON immediately.

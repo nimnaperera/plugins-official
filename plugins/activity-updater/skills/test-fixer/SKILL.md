@@ -28,7 +28,7 @@ $ARGUMENTS
 
 ```bash
 cd <working-directory>
-dotnet test "<solution-file>" --no-build 2>&1
+dotnet test "<solution-file>" -c Release -p:Platform="Any CPU" --no-build 2>&1
 ```
 
 If all pass → return success immediately.
@@ -58,8 +58,8 @@ After fixing existing failures, check if the PR context indicates new public int
 After each round of fixes:
 
 ```bash
-dotnet build "<solution-file>" -c Release /p:AzureBuild=true 2>&1
-dotnet test "<solution-file>" --no-build 2>&1
+dotnet build "<solution-file>" -c Release -p:Platform="Any CPU" /p:AzureBuild=true 2>&1
+dotnet test "<solution-file>" -c Release -p:Platform="Any CPU" --no-build 2>&1
 ```
 
 Both pass → done. Still failing after 5 complete cycles → return failure.
