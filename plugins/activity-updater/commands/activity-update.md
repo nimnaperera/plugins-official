@@ -362,31 +362,35 @@ esac
 
 **On 401/403/000** → set `build_failed=true`, `build_stage="nuget-auth"`. Skip F3 and G, continue to H. Report the HTTP code in Slack — this is a credential problem, not a build problem, and retrying will never fix it.
 
-#### F3. Restore, retrying on timeout
+#### F3. Restore — always with `--disable-parallel`
 
-Run with `timeout: 600000`. **A restore killed by the timeout is worth retrying**, because every package that finished downloading stays in `NUGET_PACKAGES` (the executor points this at the shared tenant volume). Each attempt therefore starts from a warmer cache and gets further than the last.
+**`--disable-parallel` is mandatory on the first attempt, not a retry escalation.** This is an observed result, not a precaution: against the Compello feed a plain parallel restore on a cold cache ran past the full 10-minute budget and was killed, while an immediately following retry with `--disable-parallel` completed. Parallel requests to this feed stall rather than fail, so the time is spent waiting on connections that never finish — serialising the downloads avoids the stall entirely and is *faster in wall-clock terms* despite doing one thing at a time.
 
-Every project in these repos ships a `packages.lock.json`, so try `--locked-mode` first: it restores straight from the lock file and skips dependency graph resolution entirely, which is the bulk of restore time on a warm cache.
+Run with `timeout: 600000`. Every project ships a `packages.lock.json`, so `--locked-mode` is the fast path: it restores straight from the lock and skips dependency graph resolution.
 
 ```bash
 cd /tmp/<name> && . /tmp/<name>.env
 echo "NUGET_PACKAGES=${NUGET_PACKAGES:-<default>}"
-dotnet restore "$SLNX_FILE" -p:Platform="Any CPU" --locked-mode 2>&1
+echo "NUGET_HTTP_CACHE_PATH=${NUGET_HTTP_CACHE_PATH:-<default>}"
+dotnet restore "$SLNX_FILE" -p:Platform="Any CPU" --locked-mode --disable-parallel 2>&1
 echo "Restore exit: $?"
 ```
 
-`--locked-mode` **fails by design** (`NU1004`, "the packages lock file is inconsistent") when the submodule bump changed a package version — that is the lock file doing its job, not an error to work around. When you see `NU1004`, drop `--locked-mode` and restore normally; that run legitimately needs to update the lock, and the updated `packages.lock.json` must be committed with the rest of the change at step I.
+`--locked-mode` **fails by design** (`NU1004`, "the packages lock file is inconsistent") when the submodule bump changed a package version — that is the lock file doing its job, not an error to work around. On `NU1004`, drop `--locked-mode` and restore normally; that run legitimately needs to update the lock, and the updated `packages.lock.json` must be committed with the rest of the change at step I.
 
-Retry rules — make each attempt a **separate** Bash call with `timeout: 600000`, never a loop inside one block (three attempts in one block would exceed the 10-minute cap):
+Retry rules — make each attempt a **separate** Bash call with `timeout: 600000`, never a loop inside one block (multiple 10-minute attempts in one block would exceed the cap). Keep `--disable-parallel` on every attempt:
 
-| Attempt | Command change |
+| Attempt | Command |
 |---|---|
-| 1 | with `--locked-mode` (fast path) |
-| 2 | drop `--locked-mode` — required if `NU1004`, harmless otherwise |
-| 3 | add `--disable-parallel` — serialises downloads, clearing feed throttling and connection resets |
-| 4 | add `--disable-parallel -v n` — normal verbosity so the package or source that stalls is named |
+| 1 | `--locked-mode --disable-parallel` |
+| 2 | `--disable-parallel` — drop `--locked-mode`; required on `NU1004`, harmless otherwise |
+| 3 | `--disable-parallel -v n` — normal verbosity, so the package or source that stalls is named in the output |
 
-Give up after **4** attempts.
+Give up after **5** attempts.
+
+**A timed-out restore is always worth retrying**, because every package that finished downloading stays in `NUGET_PACKAGES`. Each attempt resumes from a warmer cache — which is exactly why the retry succeeded where the first attempt was killed. If attempt 1 times out, treat that as normal on a cold cache rather than as a failure, and proceed to attempt 2.
+
+Never add `--no-cache` or `--force`. Both discard the cache this step depends on and guarantee the cold-start timeout on every attempt.
 
 **On non-zero exit after 3 attempts** → set `build_failed=true`, `build_stage="restore"`, `restore_failed=true`. Skip G, continue to H. Record in `build_error_summary` whether the failure was a timeout (attempts exhausted) or a real NuGet error, so the PR description distinguishes an infrastructure problem from a broken dependency.
 
@@ -724,6 +728,10 @@ Grep the executor output for `[runtimes]`. If it is not the first line, fix the 
 
 **4. `--locked-mode` restore and `--no-restore` builds** keep the per-activity fast path free of redundant dependency resolution.
 
+**5. `--disable-parallel` is faster here, not slower.** Counter-intuitive but measured: a parallel restore against the Compello feed stalled past the 10-minute budget and was killed, while `--disable-parallel` completed. The feed does not fail parallel requests, it leaves them hanging, so the wall-clock cost of concurrency is worse than serialising. Do not "optimise" this flag away.
+
 **Not worth doing:** shallow clones. These repos are ~1.7 MB with single-digit commit counts, so `--depth 1` saves a fraction of a second and complicates the submodule pinning in step C.
+
+**Never use** `--no-cache` or `--force` on restore. They discard the caches every other item here depends on.
 
 **Deliberately not enabled: processing activities in parallel.** It is the largest remaining lever — ten sequential pipelines become roughly one — but this command mandates sequential inline execution, and parallel activities would contend on the same NuGet cache and provisioning lock. If you want it, say so explicitly; it needs the execution model at the top of this file changed, not just a flag.

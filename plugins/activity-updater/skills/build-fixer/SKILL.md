@@ -63,11 +63,25 @@ If this fails → return:
 
 ## Step 2 — dotnet restore
 
+Run with the Bash tool's `timeout` set to `600000`. The 2-minute default kills a cold restore mid-flight, which then looks like a restore failure rather than a budget problem.
+
+`--disable-parallel` is mandatory, not a retry escalation. Observed against the Compello feed: a parallel restore on a cold cache stalled past the full 10-minute budget and was killed, while an immediate retry with `--disable-parallel` completed. The feed leaves parallel requests hanging rather than failing them, so serialising is faster in wall-clock terms.
+
+`--locked-mode` is the fast path — every project ships a `packages.lock.json`, so restore comes straight from the lock without dependency resolution.
+
 ```bash
-dotnet restore "<solution-file>" -p:Platform="Any CPU" 2>&1
+dotnet restore "<solution-file>" -p:Platform="Any CPU" --locked-mode --disable-parallel 2>&1
 ```
 
-If exit code non-zero → return:
+Retry as separate Bash calls, keeping `--disable-parallel` on all of them:
+
+1. as above
+2. drop `--locked-mode` — required on `NU1004` (the bump changed a package version, so the lock must be updated and committed), harmless otherwise
+3. add `-v n` so the stalling package or source is named
+
+A timed-out attempt resumes from a warmer cache, so retrying is worthwhile rather than futile. Never add `--no-cache` or `--force` — both discard the cache the retry depends on.
+
+If exit code non-zero after 3 attempts → return:
 ```json
 {"status": "failed", "stage": "restore", "attempts": 0, "files_modified": [], "restore_failed": true, "error_summary": "<restore error output>"}
 ```
