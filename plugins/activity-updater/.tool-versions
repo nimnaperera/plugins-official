@@ -1,2 +1,14 @@
-dotnet 9.0
+# Read by the-agent's Executor/provision_runtimes.sh, which installs these via mise.
+#
+# ONE LINE PER TOOL. Two `dotnet` lines become duplicate keys in the generated
+# mise TOML config, which is a hard parse error — that breaks every later mise
+# call (install, env, and the command-not-found fallback), leaving no dotnet on
+# PATH at all. Extra versions on the same line are ignored: only $2 is read.
+#
+# 10.0 is sufficient for the activity solutions. Host/Process/Test all target
+# net10.0; only the ams-activity-base worker targets net9.0, which SDK 10 builds
+# via NuGet reference packs. Nothing executes standalone on net9.0, so the .NET 9
+# runtime is not required.
+#
+# Repos override this: a global.json in the activity repo wins over this manifest.
 dotnet 10.0
