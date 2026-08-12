@@ -18,7 +18,7 @@ These are hardcoded. Add or remove entries here to change coverage. Do NOT inclu
 
 ```json
 [
-  { "name": "ams-activity-zip-extractor", "url": "https://compello@dev.azure.com/compello/Send%20-%20Azure/_git/ams-activity-zip-extractor" }
+  { "name": "ams-activity-pdf-embedder", "url": "https://compello@dev.azure.com/compello/Send%20-%20Azure/_git/ams-activity-pdf-embedder" }
 ]
 ```
 
