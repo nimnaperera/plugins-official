@@ -18,7 +18,10 @@ These are hardcoded. Add or remove entries here to change coverage. Do NOT inclu
 
 ```json
 [
-  { "name": "ams-activity-pdf-embedder", "url": "https://compello@dev.azure.com/compello/Send%20-%20Azure/_git/ams-activity-pdf-embedder" }
+  { "name": "ams-activity-pdf-embedder", "url": "https://compello@dev.azure.com/compello/Send%20-%20Azure/_git/ams-activity-pdf-embedder" },
+  { "name": "ams-activity-deliver-direct-debit-einvoice", "url": "https://compello@dev.azure.com/compello/Send%20-%20Azure/_git/ams-activity-deliver-direct-debit-einvoice" },
+  { "name": "ams-activity-deliver-einvoice", "url": "https://compello@dev.azure.com/compello/Send%20-%20Azure/_git/ams-activity-deliver-einvoice" },
+  { "name": "ams-activity-deliver-einvoice-notification", "url": "https://compello@dev.azure.com/compello/Send%20-%20Azure/_git/ams-activity-deliver-einvoice-notification" }
 ]
 ```
 
