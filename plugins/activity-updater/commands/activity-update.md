@@ -164,6 +164,80 @@ Verify the printed SHA equals `<commit-id>`. If it does not, treat this step as 
 
 **On failure** → **[SLACK]** `PR_URL=""` `MSG="❌ <name>: submodule update failed — <error-summary>. Skipped."` → `rm -rf /tmp/<name>` → next activity.
 
+### C2. Early exit if `main` already has this update
+
+**This is the single largest time saving in the whole run.** Without it, a repo that is already up to date still pays a full restore, build, and test before step I discovers there is nothing to commit. Across ten activities on a re-run, that is ten wasted pipelines.
+
+Compare against the **remote** `main`, not local `HEAD`: if a previous run committed the bump locally but failed to push, `HEAD` looks current while no PR exists, and skipping would silently drop the work.
+
+Compare against `FETCH_HEAD`, not `origin/main`. `git fetch origin main` reliably sets `FETCH_HEAD`, but does not always update the `refs/remotes/origin/main` tracking ref — comparing against a stale tracking ref makes this check never fire.
+
+```bash
+cd /tmp/<name>
+SUB_PATH=$(git config --file .gitmodules --get-regexp path | awk '{print $2}' | head -1)
+git fetch -q origin main
+if git diff --quiet FETCH_HEAD -- "$SUB_PATH"; then
+  echo "SKIP: remote main already pins $SUB_PATH at this commit — nothing to do"
+  exit 3
+fi
+echo "Update needed — remote main differs at $SUB_PATH"
+git diff --submodule=short FETCH_HEAD -- "$SUB_PATH" | grep Subproject
+```
+
+**On exit 3** → set `no_changes=true`. Skip steps D through K entirely and report `ℹ️ <name>: already up to date — no PR needed` at step L. Do not restore, build, or test.
+
+### C3. Extract what actually changed in activity-base
+
+Do not diagnose breaking changes from compiler errors alone. The exact diff between the commit `main` currently pins and `<commit-id>` is available locally, and it is **ground truth** about which APIs moved. A compiler error tells you a call site broke; this diff tells you what it should become.
+
+The old SHA is what remote `main` pins — the same `FETCH_HEAD` from C2, which persists in `.git` across Bash calls.
+
+```bash
+cd /tmp/<name> && . /tmp/<name>.env
+git fetch -q origin main
+OLD_SUB=$(git rev-parse FETCH_HEAD:"$SUB_PATH")
+NEW_SUB=$(git -C "$SUB_PATH" rev-parse HEAD)
+DIFF_FILE=/tmp/<name>-base-diff.md
+echo "activity-base: $OLD_SUB -> $NEW_SUB"
+
+{
+  echo "# ams-activity-base changes: ${OLD_SUB:0:8} -> ${NEW_SUB:0:8}"
+  echo
+  echo "## Files changed"
+  git -C "$SUB_PATH" diff --stat "$OLD_SUB" "$NEW_SUB"
+  echo
+  echo "## Added / deleted / renamed"
+  git -C "$SUB_PATH" diff --name-status -M "$OLD_SUB" "$NEW_SUB"
+  echo
+  echo "## Public API surface changes"
+  echo '```diff'
+  git -C "$SUB_PATH" diff -U0 "$OLD_SUB" "$NEW_SUB" -- '*.cs' \
+    | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
+    | grep -E '(public|protected|internal|interface|abstract|virtual|override|record|enum|class|struct|required)' \
+    | head -200
+  echo '```'
+  echo
+  echo "## Package reference changes"
+  echo '```diff'
+  git -C "$SUB_PATH" diff -U0 "$OLD_SUB" "$NEW_SUB" -- '*.csproj' 'Directory.Packages.props' \
+    | grep -E '^[+-].*(PackageReference|PackageVersion)' | head -40
+  echo '```'
+} > "$DIFF_FILE"
+
+echo "BASE_DIFF='$DIFF_FILE'" >> /tmp/<name>.env
+cat "$DIFF_FILE"
+```
+
+`-U0` with the signature grep is deliberate: it yields only changed declaration lines, so a large refactor still produces a short, high-signal summary instead of thousands of context lines. If the API section hits the 200-line cap, read the full diff for the specific type you are fixing rather than dumping everything:
+
+```bash
+git -C "$SUB_PATH" diff "$OLD_SUB" "$NEW_SUB" -- '*/TypeName.cs'
+```
+
+**Read `$BASE_DIFF` before attempting any fix in step G or H.** It is written once per activity and persists for the whole run, so re-read it rather than re-deriving it on each attempt.
+
+**If a package reference changed**, expect `NU1004` from `--locked-mode` in F3 and a `packages.lock.json` update that must be committed at step I.
+
 ### D. Find solution file and write the state file
 
 The solution is **not** at the repo root — it typically lives under `appcode/`. Do not add `-maxdepth 1`; it finds nothing.
@@ -240,15 +314,30 @@ PYEOF
 >
 > The Bash tool defaults to a **2-minute** timeout. A cold NuGet restore against the Compello feed routinely exceeds that, so with the default the call is killed mid-restore, the step is reported as failed, and the whole run gets rescheduled — the timeout is not the feed being slow, it is the tool budget being too small.
 
-#### F1. Warm up the toolchain in its own budget
+#### F1. Warm up the toolchain and park the NuGet caches on the shared volume
 
 The first `dotnet` invocation may trigger an SDK download (the executor provisions .NET on demand via mise). Do that here so it cannot consume the restore's budget. Run with `timeout: 600000`.
+
+The executor sets `NUGET_PACKAGES` onto the shared tenant volume, but **not** `NUGET_HTTP_CACHE_PATH`. That second cache holds the downloaded `.nupkg` files and defaults to a container-local path, so without this it is discarded after every run and every activity re-downloads from the feed. Point it at the same volume — all ten activities share the `AMS.*` packages, so the first restore warms the cache for the rest.
 
 ```bash
 cd /tmp/<name> && . /tmp/<name>.env
 dotnet --version
 dotnet --list-sdks
+
+# Persist the .nupkg HTTP cache next to the package cache, whatever volume that is on.
+if [ -n "${NUGET_PACKAGES:-}" ]; then
+  export NUGET_HTTP_CACHE_PATH="$(dirname "$NUGET_PACKAGES")/nuget-http-cache"
+  mkdir -p "$NUGET_HTTP_CACHE_PATH"
+  echo "export NUGET_HTTP_CACHE_PATH='$NUGET_HTTP_CACHE_PATH'" >> /tmp/<name>.env
+  echo "NuGet http cache: $NUGET_HTTP_CACHE_PATH"
+else
+  echo "WARNING: NUGET_PACKAGES unset — no shared runtime volume. Every restore will be cold."
+fi
+echo "NUGET_PACKAGES=${NUGET_PACKAGES:-<unset>}"
 ```
+
+If that warning appears, the shared volume is not mounted and **no plugin-side change can make restores fast** — fix the mount instead. See *Speed checklist* at the end of this document.
 
 #### F2. Probe feed auth before restoring
 
@@ -274,22 +363,27 @@ esac
 
 Run with `timeout: 600000`. **A restore killed by the timeout is worth retrying**, because every package that finished downloading stays in `NUGET_PACKAGES` (the executor points this at the shared tenant volume). Each attempt therefore starts from a warmer cache and gets further than the last.
 
+Every project in these repos ships a `packages.lock.json`, so try `--locked-mode` first: it restores straight from the lock file and skips dependency graph resolution entirely, which is the bulk of restore time on a warm cache.
+
 ```bash
 cd /tmp/<name> && . /tmp/<name>.env
 echo "NUGET_PACKAGES=${NUGET_PACKAGES:-<default>}"
-dotnet restore "$SLNX_FILE" -p:Platform="Any CPU" 2>&1
+dotnet restore "$SLNX_FILE" -p:Platform="Any CPU" --locked-mode 2>&1
 echo "Restore exit: $?"
 ```
+
+`--locked-mode` **fails by design** (`NU1004`, "the packages lock file is inconsistent") when the submodule bump changed a package version — that is the lock file doing its job, not an error to work around. When you see `NU1004`, drop `--locked-mode` and restore normally; that run legitimately needs to update the lock, and the updated `packages.lock.json` must be committed with the rest of the change at step I.
 
 Retry rules — make each attempt a **separate** Bash call with `timeout: 600000`, never a loop inside one block (three attempts in one block would exceed the 10-minute cap):
 
 | Attempt | Command change |
 |---|---|
-| 1 | as above |
-| 2 | append `--disable-parallel` — serialises downloads, which clears feed throttling and connection-reset failures |
-| 3 | append `--disable-parallel -v n` — normal verbosity so the specific package or source that stalls is named in the output |
+| 1 | with `--locked-mode` (fast path) |
+| 2 | drop `--locked-mode` — required if `NU1004`, harmless otherwise |
+| 3 | add `--disable-parallel` — serialises downloads, clearing feed throttling and connection resets |
+| 4 | add `--disable-parallel -v n` — normal verbosity so the package or source that stalls is named |
 
-Give up after **3** attempts.
+Give up after **4** attempts.
 
 **On non-zero exit after 3 attempts** → set `build_failed=true`, `build_stage="restore"`, `restore_failed=true`. Skip G, continue to H. Record in `build_error_summary` whether the failure was a timeout (attempts exhausted) or a real NuGet error, so the PR description distinguishes an infrastructure problem from a broken dependency.
 
@@ -307,11 +401,27 @@ If a build fails with `NU1101`/`NU1102` (package not found) or otherwise insists
 **On success** (exit 0): set `build_failed=false`, continue to H.
 
 **On failure**:
+
 1. Read the full compiler error output.
-2. Use the activity-base PR context (title `<pr-title>`, commit `<commit-id>`) to understand what API changed — missing method, renamed type, changed constructor signature, new required parameter. Breaking changes may not be documented; diagnose from compiler errors.
-3. Fix ONLY the files the compiler errors point to. Do not refactor, rename, or touch anything unrelated. Print each file you modify.
-4. Re-run build. Repeat up to 10 total attempts.
-5. After 10 attempts still failing: set `build_failed=true`, `build_stage="build"`.
+2. **Read `$BASE_DIFF` (written in C3).** This is the authoritative account of what changed in activity-base. Map each compiler error to the diff entry that caused it before editing anything — the diff tells you what the call site should become, which the error alone does not.
+3. Match the error to its cause and apply the corresponding fix:
+
+   | Compiler error | Look for in `$BASE_DIFF` | Fix |
+   |---|---|---|
+   | `CS0117` / `CS1061` — member does not exist | a removed `public` member with a similar added one | use the renamed member |
+   | `CS1501` / `CS7036` — wrong argument count / missing required arg | added parameter on a changed signature | pass the new argument; use `CancellationToken.None` only if no token is in scope |
+   | `CS9035` — required member not set | added `required` property | set it at every construction site |
+   | `CS0535` — interface member not implemented | added interface member | implement it, including in test mocks and stubs |
+   | `CS0246` — type not found | deleted or moved type | update the namespace, or the replacement type if renamed |
+   | `CS0019` / enum mismatch | renamed enum member | use the new member name |
+   | `NU1101` / `NU1102` | package reference change | re-run F3 without `--locked-mode` |
+
+4. Fix ONLY the files the compiler errors point to. Do not refactor, rename, or touch anything unrelated. Print each file you modify.
+5. Re-run build. Repeat up to 10 total attempts.
+6. **If two consecutive attempts produce the same error**, stop editing and re-read `$BASE_DIFF` plus the changed base type in full (`git -C "$SUB_PATH" show <new-sha> -- path/to/Type.cs`). Repeating a failing edit burns attempts; the signature you need is in the submodule source.
+7. After 10 attempts still failing: set `build_failed=true`, `build_stage="build"`. Record which error classes never resolved.
+
+**Never work around a breaking change by deleting a call, stubbing a method to throw, or commenting code out.** Those produce a green build that ships broken behaviour. If the correct fix is genuinely unclear, leave the build failing and let step L report it for manual review — a failed build with an accurate Slack message is far better than a passing build that silently drops functionality.
 
 Track: `build_attempts` (count), `build_files_modified` (list), `build_error_summary` (last error classes seen).
 
@@ -336,23 +446,40 @@ If the runner reports **no test project / no test assemblies**, that is not a pa
 
 #### H2. Diagnose each failure
 
+**Read `$BASE_DIFF` first.** A test failing after a submodule bump almost always traces to a specific entry in it, and a behavioural change in the base is a very different fix from a stale assertion.
+
 For each failing test:
 1. Read the test file.
 2. Find and read the implementation it calls (use Grep on the method name).
-3. Classify the root cause:
-   - **Outdated assertion**: method exists but return value or signature changed
-   - **Stale mock/stub**: interface method renamed or signature changed
-   - **New required parameter**: constructor or method added a param with no default
-   - **Missing coverage**: new public method in the submodule has no test
+3. Cross-reference `$BASE_DIFF` and classify the root cause:
+
+   | Symptom | Cause in `$BASE_DIFF` | Fix |
+   |---|---|---|
+   | Assertion expects an old value | renamed enum member or changed return type | update the expected value |
+   | Mock does not satisfy the interface | added interface member | add the member to the mock setup |
+   | Constructor call fails to compile | added required parameter or `required` property | supply it in the arrange step |
+   | Test passes but asserts nothing meaningful | behaviour moved in the base | assert against the new behaviour, not the old shape |
+
+4. **Decide whether the test or the expectation is wrong.** If `$BASE_DIFF` shows the base deliberately changed behaviour, the test's expectation is outdated and should be updated. If the diff shows no relevant behavioural change, the failure is likely a real regression in this activity — do not "fix" the test to make it pass; report it.
 
 Fix ONLY test project files. Do not modify production code.
 
+**Never weaken a test to make it pass** — no deleting assertions, no `Assert.True(true)`, no `[Skip]`, no loosening an exact assertion to a null check. If a test cannot be made to pass honestly, leave it failing; step L reports it as needing review. A weakened test is worse than a failing one because it hides the regression permanently.
+
 #### H3. New test coverage
 
-After fixing existing failures, check if the PR context indicates new public interfaces were added. If yes:
+After fixing existing failures, check the **Added / deleted / renamed** and **Public API surface changes** sections of `$BASE_DIFF` for new public types or members. Those are the only things needing new coverage — no guessing from the PR title.
+
 1. Find the test project: `find . -type d -name "*Test*" | head -3`
 2. Read existing tests to understand the test style (base class, assertion framework, mock framework used).
-3. Write new test methods following the existing patterns exactly. Cover only the new interface as it applies to this specific activity.
+3. Write new test methods following the existing patterns exactly.
+
+Cover only what this activity actually uses. A new base interface that this activity never references needs no test here — it belongs in the base repo's own suite. Grep for the new type first:
+
+```bash
+cd /tmp/<name> && . /tmp/<name>.env
+grep -rl "NewTypeName" --include=*.cs . | grep -v "$SUB_PATH" || echo "not referenced by this activity — no test needed"
+```
 
 #### H4. Build + test loop (hard cap: 5 cycles)
 
@@ -575,3 +702,25 @@ After all activities are processed:
 **[SLACK]** `PR_URL=""` `MSG="*Activity-base update complete*\nTriggered by PR #<pr-id>: <pr-title>\n• ✅ <n-success> succeeded\n• ⚠️ <n-issues> PRs with issues\n• ℹ️ <n-uptodate> already up to date\n• ❌ <n-skipped> skipped"`
 
 Every activity must land in exactly one bucket, and the four counts must sum to the total number of activities in the list. If they do not, report the discrepancy rather than adjusting a count to make it balance.
+
+## Speed Checklist
+
+Ordered by impact. The first item dwarfs everything the plugin itself can do.
+
+**1. Confirm the shared runtime volume is mounted.** If it is not, the .NET SDK is re-downloaded and every package is re-fetched on *every* run, and no plugin-side tuning helps. The executor logs one of these lines:
+
+- `Runtime cache root: /workspace/runtimes` — mounted, caches persist
+- `No shared runtime volume mounted — falling back to per-repo cache` — lost per repo
+- `No persistent volume available` — lost per run, worst case
+
+Grep the executor output for `[runtimes]`. If it is not the first line, fix the mount before tuning anything else.
+
+**2. Early exit (step C2)** skips restore, build, and test for activities already on `main`. On a re-run this is close to the entire cost of the run.
+
+**3. Warm caches are shared across activities.** All ten activities depend on the same `Amili.Send2.*` packages, so activity 1 pays the download and activities 2–10 hit the cache. Do not shuffle the repo order between runs; a stable order keeps the warm path predictable.
+
+**4. `--locked-mode` restore and `--no-restore` builds** keep the per-activity fast path free of redundant dependency resolution.
+
+**Not worth doing:** shallow clones. These repos are ~1.7 MB with single-digit commit counts, so `--depth 1` saves a fraction of a second and complicates the submodule pinning in step C.
+
+**Deliberately not enabled: processing activities in parallel.** It is the largest remaining lever — ten sequential pipelines become roughly one — but this command mandates sequential inline execution, and parallel activities would contend on the same NuGet cache and provisioning lock. If you want it, say so explicitly; it needs the execution model at the top of this file changed, not just a flag.
