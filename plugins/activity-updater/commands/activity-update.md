@@ -236,20 +236,73 @@ PYEOF
 
 ### F. dotnet restore
 
+> **Every `dotnet` command in steps F, G, and H must be run with the Bash tool's `timeout` set to `600000` (10 minutes), its maximum.**
+>
+> The Bash tool defaults to a **2-minute** timeout. A cold NuGet restore against the Compello feed routinely exceeds that, so with the default the call is killed mid-restore, the step is reported as failed, and the whole run gets rescheduled — the timeout is not the feed being slow, it is the tool budget being too small.
+
+#### F1. Warm up the toolchain in its own budget
+
+The first `dotnet` invocation may trigger an SDK download (the executor provisions .NET on demand via mise). Do that here so it cannot consume the restore's budget. Run with `timeout: 600000`.
+
 ```bash
 cd /tmp/<name> && . /tmp/<name>.env
+dotnet --version
+dotnet --list-sdks
+```
+
+#### F2. Probe feed auth before restoring
+
+A bad or expired credential makes NuGet retry with backoff until the tool budget runs out, so an auth failure looks exactly like a timeout. This probe turns that into an instant, unambiguous error. It prints only the HTTP status — never the token.
+
+```bash
+CID=$(printenv 'NUGET-SP-CLIENT-ID')
+TOK=$(printenv 'AZURE-DEVOPS-TOKEN')
+CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -u "$CID:$TOK" \
+  "https://compello.pkgs.visualstudio.com/_packaging/Compello/nuget/v3/index.json")
+echo "Compello feed auth probe: HTTP $CODE"
+case "$CODE" in
+  200) echo "Feed reachable and credentials accepted" ;;
+  401|403) echo "FATAL: feed rejected the credentials (HTTP $CODE) — restore would hang, not fail fast"; exit 1 ;;
+  000) echo "FATAL: no network route to the Compello feed"; exit 1 ;;
+  *) echo "WARNING: unexpected status $CODE — continuing, restore may still work" ;;
+esac
+```
+
+**On 401/403/000** → set `build_failed=true`, `build_stage="nuget-auth"`. Skip F3 and G, continue to H. Report the HTTP code in Slack — this is a credential problem, not a build problem, and retrying will never fix it.
+
+#### F3. Restore, retrying on timeout
+
+Run with `timeout: 600000`. **A restore killed by the timeout is worth retrying**, because every package that finished downloading stays in `NUGET_PACKAGES` (the executor points this at the shared tenant volume). Each attempt therefore starts from a warmer cache and gets further than the last.
+
+```bash
+cd /tmp/<name> && . /tmp/<name>.env
+echo "NUGET_PACKAGES=${NUGET_PACKAGES:-<default>}"
 dotnet restore "$SLNX_FILE" -p:Platform="Any CPU" 2>&1
 echo "Restore exit: $?"
 ```
 
-**On non-zero exit** → set `build_failed=true`, `build_stage="restore"`, `restore_failed=true`. Skip G, continue to H.
+Retry rules — make each attempt a **separate** Bash call with `timeout: 600000`, never a loop inside one block (three attempts in one block would exceed the 10-minute cap):
+
+| Attempt | Command change |
+|---|---|
+| 1 | as above |
+| 2 | append `--disable-parallel` — serialises downloads, which clears feed throttling and connection-reset failures |
+| 3 | append `--disable-parallel -v n` — normal verbosity so the specific package or source that stalls is named in the output |
+
+Give up after **3** attempts.
+
+**On non-zero exit after 3 attempts** → set `build_failed=true`, `build_stage="restore"`, `restore_failed=true`. Skip G, continue to H. Record in `build_error_summary` whether the failure was a timeout (attempts exhausted) or a real NuGet error, so the PR description distinguishes an infrastructure problem from a broken dependency.
 
 ### G. Build + fix loop (hard cap: 10 attempts)
 
+Run every build with `timeout: 600000`. Add `--no-restore` so the build cannot silently re-enter restore and spend its whole budget there — F3 already restored, and a build that genuinely needs a restore should surface that as an error rather than hiding it as a timeout.
+
 ```bash
 cd /tmp/<name> && . /tmp/<name>.env
-dotnet build "$SLNX_FILE" -c Release -p:Platform="Any CPU" /p:AzureBuild=true 2>&1
+dotnet build "$SLNX_FILE" -c Release -p:Platform="Any CPU" /p:AzureBuild=true --no-restore 2>&1
 ```
+
+If a build fails with `NU1101`/`NU1102` (package not found) or otherwise insists assets are missing, re-run F3 once, then resume the loop. Do not add `--no-restore` blindly if the submodule bump introduced a genuinely new package reference — in that case a restore is legitimately required.
 
 **On success** (exit 0): set `build_failed=false`, continue to H.
 
@@ -269,6 +322,8 @@ Track: `build_attempts` (count), `build_files_modified` (list), `build_error_sum
 #### H1. Run tests
 
 `-c Release` must match the build configuration — without it the test runner looks for `Debug` assemblies and reports "no test assemblies found".
+
+Run with `timeout: 600000`. `--no-build` already prevents a hidden restore here.
 
 ```bash
 cd /tmp/<name> && . /tmp/<name>.env
@@ -301,13 +356,15 @@ After fixing existing failures, check if the PR context indicates new public int
 
 #### H4. Build + test loop (hard cap: 5 cycles)
 
-After each round of fixes:
+After each round of fixes. Run with `timeout: 600000` — this block is a build *and* a test run, so it is the most likely of all steps to exceed the 2-minute default.
 
 ```bash
 cd /tmp/<name> && . /tmp/<name>.env
-dotnet build "$SLNX_FILE" -c Release -p:Platform="Any CPU" /p:AzureBuild=true 2>&1
-dotnet test "$SLNX_FILE" -c Release -p:Platform="Any CPU" --no-build 2>&1
+dotnet build "$SLNX_FILE" -c Release -p:Platform="Any CPU" /p:AzureBuild=true --no-restore 2>&1 \
+  && dotnet test "$SLNX_FILE" -c Release -p:Platform="Any CPU" --no-build 2>&1
 ```
+
+`&&` rather than two separate lines: if the build fails there is nothing to test, and running `dotnet test --no-build` anyway produces a confusing "assemblies not found" error that masks the real compiler error.
 
 Both pass → set `tests_failed=false`. Still failing after 5 complete cycles → set `tests_failed=true`.
 
