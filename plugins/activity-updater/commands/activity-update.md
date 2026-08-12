@@ -118,12 +118,18 @@ token     = os.environ.get("AZURE-DEVOPS-TOKEN", "")
 if not client_id or not token:
     print("ERROR: NUGET-SP-CLIENT-ID or AZURE-DEVOPS-TOKEN not set"); exit(1)
 
+injected = 0
 for cfg in cfgs:
     with open(cfg) as f: content = f.read()
+    if "%NUGET_SP_CLIENT_ID%" not in content and "%NUGET_SP_PASSWORD%" not in content:
+        print(f"Skipped {cfg} — no placeholders"); continue
     content = content.replace("%NUGET_SP_CLIENT_ID%", client_id)
     content = content.replace("%NUGET_SP_PASSWORD%", token)
     with open(cfg, "w") as f: f.write(content)
     print(f"NuGet credentials injected into {cfg}")
+    injected += 1
+if injected == 0:
+    print("ERROR: no nuget.config contained credential placeholders"); exit(1)
 PYEOF
 ```
 
@@ -132,7 +138,7 @@ PYEOF
 ### F. dotnet restore
 
 ```bash
-dotnet restore "$SLNX_FILE" 2>&1
+dotnet restore "$SLNX_FILE" -p:Platform="Any CPU" 2>&1
 echo "Restore exit: $?"
 ```
 
@@ -141,7 +147,7 @@ echo "Restore exit: $?"
 ### G. Build + fix loop (hard cap: 10 attempts)
 
 ```bash
-dotnet build "$SLNX_FILE" -c Release /p:AzureBuild=true 2>&1
+dotnet build "$SLNX_FILE" -c Release -p:Platform="Any CPU" /p:AzureBuild=true 2>&1
 ```
 
 **On success** (exit 0): set `build_failed=false`, continue to H.
@@ -192,7 +198,7 @@ After fixing existing failures, check if the PR context indicates new public int
 After each round of fixes:
 
 ```bash
-dotnet build "$SLNX_FILE" -c Release /p:AzureBuild=true 2>&1
+dotnet build "$SLNX_FILE" -c Release -p:Platform="Any CPU" /p:AzureBuild=true 2>&1
 dotnet test "$SLNX_FILE" --no-build 2>&1
 ```
 
@@ -206,7 +212,7 @@ Restore `nuget.config` before staging — credentials must not be committed:
 
 ```bash
 cd /tmp/<name>
-find . -name "nuget.config" -not -path "*/.git/*" | xargs git checkout --
+git diff --name-only | grep "nuget.config" | xargs -r git checkout --
 git add -A
 git commit -m "chore: update ams-activity-base submodule
 
