@@ -109,8 +109,8 @@ result = subprocess.run(
     ["find", ".", "-name", "nuget.config", "-not", "-path", "*/.git/*"],
     capture_output=True, text=True
 )
-cfg = result.stdout.strip().split("\n")[0]
-if not cfg:
+cfgs = [c for c in result.stdout.strip().split("\n") if c]
+if not cfgs:
     print("ERROR: nuget.config not found"); exit(1)
 
 client_id = os.environ.get("NUGET-SP-CLIENT-ID", "")
@@ -118,11 +118,12 @@ token     = os.environ.get("AZURE-DEVOPS-TOKEN", "")
 if not client_id or not token:
     print("ERROR: NUGET-SP-CLIENT-ID or AZURE-DEVOPS-TOKEN not set"); exit(1)
 
-with open(cfg) as f: content = f.read()
-content = content.replace("%NUGET_SP_CLIENT_ID%", client_id)
-content = content.replace("%NUGET_SP_PASSWORD%", token)
-with open(cfg, "w") as f: f.write(content)
-print(f"NuGet credentials injected into {cfg}")
+for cfg in cfgs:
+    with open(cfg) as f: content = f.read()
+    content = content.replace("%NUGET_SP_CLIENT_ID%", client_id)
+    content = content.replace("%NUGET_SP_PASSWORD%", token)
+    with open(cfg, "w") as f: f.write(content)
+    print(f"NuGet credentials injected into {cfg}")
 PYEOF
 ```
 
@@ -205,7 +206,7 @@ Restore `nuget.config` before staging — credentials must not be committed:
 
 ```bash
 cd /tmp/<name>
-git checkout -- $(find . -name "nuget.config" -not -path "*/.git/*" | head -1)
+find . -name "nuget.config" -not -path "*/.git/*" | xargs git checkout --
 git add -A
 git commit -m "chore: update ams-activity-base submodule
 
