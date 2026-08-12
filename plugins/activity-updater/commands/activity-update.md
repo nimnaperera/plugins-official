@@ -4,9 +4,13 @@ description: Propagate an ams-activity-base submodule update across all register
 argument-hint: <pr-id> <pr-title> <commit-id> <merged-by> <ado-org-url> <ado-project>
 ---
 
-You are the Activity Base Updater orchestrator. Your sole job is to propagate a merged change from `ams-activity-base` into every activity service repo listed below. You drive the loop and delegate complex sub-tasks to specialised sub-agents.
+You are the Activity Base Updater orchestrator. Your sole job is to propagate a merged change from `ams-activity-base` into every activity service repo listed below.
 
 Parse arguments in order: PR ID, PR title (may be quoted), merge commit SHA, merged-by display name, ADO org URL, ADO project name.
+
+## Execution Model
+
+**Process every repo sequentially in this session. Do NOT use the Workflow tool. Do NOT spawn parallel background tasks. One repo at a time, all steps inline.**
 
 ## Activity Repository List
 
@@ -30,13 +34,35 @@ Submodule commit: <commit-id>
 Merged by: <merged-by>
 ```
 
+## Slack Helper
+
+At every point labelled **[SLACK]**, execute this bash block with `MSG` and `PR_URL` set to the values described for that step:
+
+```bash
+WEBHOOK_URL=$(printenv 'SLACK-WEBHOOK-URL')
+PAYLOAD="{\"pr_url\":\"$PR_URL\",\"msg\":\"$MSG\"}"
+if [ -n "$WEBHOOK_URL" ]; then
+  for ATTEMPT in 1 2 3; do
+    FULL_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$WEBHOOK_URL" \
+      -H 'Content-type: application/json' -d "$PAYLOAD")
+    HTTP_CODE=$(echo "$FULL_RESPONSE" | tail -1)
+    BODY=$(echo "$FULL_RESPONSE" | head -n -1)
+    echo "Slack attempt $ATTEMPT: HTTP $HTTP_CODE — $BODY"
+    [ "$HTTP_CODE" = "200" ] && break
+    { [ "$HTTP_CODE" = "429" ] || [ "${HTTP_CODE:0:1}" = "5" ]; } && sleep 2 || break
+  done
+else
+  echo "Slack: SLACK-WEBHOOK-URL not set — skipped"
+fi
+```
+
 ## Execution Rules
 
 - Execute every step autonomously. No confirmation prompts.
 - On any failure: notify Slack as described for that step, then continue to the next activity. Never abort the whole run.
 - Derive `<short-sha>` as the first 8 characters of `<commit-id>`.
-- Build retry cap (10) and test retry cap (5 cycles) are enforced inside the delegated sub-agents — do not re-implement them here.
-- When spawning a sub-agent via Task, parse its JSON output line to determine the outcome before proceeding.
+- Build retry cap (10) and test retry cap (5 cycles) are enforced inside the invoked skills — do not re-implement them here.
+- After each skill invocation, parse its JSON output to determine the outcome before proceeding.
 
 ## Per-Activity Process
 
@@ -49,7 +75,7 @@ git clone <url> /tmp/<name>
 cd /tmp/<name>
 ```
 
-**On failure** → spawn `slack-notifier` with `pr_url=""` and `msg="❌ <name>: clone failed — <error-summary>. Skipped."` → clean up → next activity.
+**On failure** → **[SLACK]** `PR_URL=""` `MSG="❌ <name>: clone failed — <error-summary>. Skipped."` → clean up → next activity.
 
 ### B. Create branch
 
@@ -63,9 +89,9 @@ git checkout -b feat/activity-base-<short-sha>
 git submodule update --init --remote
 ```
 
-**On failure** → spawn `slack-notifier` with `pr_url=""` and `msg="❌ <name>: submodule update failed — <error-summary>. Skipped."` → `rm -rf /tmp/<name>` → next activity.
+**On failure** → **[SLACK]** `PR_URL=""` `MSG="❌ <name>: submodule update failed — <error-summary>. Skipped."` → `rm -rf /tmp/<name>` → next activity.
 
-### D. Build fix (delegate to build-fixer)
+### D. Build fix (invoke build-fixer skill)
 
 Find the solution file first:
 
@@ -73,10 +99,10 @@ Find the solution file first:
 SLNX_FILE=$(find /tmp/<name> -maxdepth 1 -name "*.slnx" | head -1)
 ```
 
-Spawn the `build-fixer` sub-agent via Task with this prompt:
+Use the Skill tool to invoke `build-fixer` with this argument string:
 
 ```
-Fix the build for activity service <name>.
+name: <name>
 Working directory: /tmp/<name>
 Solution file: <SLNX_FILE>
 Context: activity-base PR #<pr-id> '<pr-title>' was merged (commit <commit-id>). Use the PR title as your primary signal for what changed in activity-base. Breaking changes may or may not be documented in the PR — diagnose from compiler errors if needed.
@@ -87,12 +113,12 @@ Parse the returned JSON:
 - `status: "success"` → continue to E.
 - `restore_failed: true` or `status: "failed"` → set `build_failed=true`, record `error_summary` and `stage`. Skip E, continue to F.
 
-### E. Tests (delegate to test-fixer — only when build_failed is false)
+### E. Tests (invoke test-fixer skill — only when build_failed is false)
 
-Spawn the `test-fixer` sub-agent via Task with this prompt:
+Use the Skill tool to invoke `test-fixer` with this argument string:
 
 ```
-Run and fix tests for activity service <name>.
+name: <name>
 Working directory: /tmp/<name>
 Solution file: <SLNX_FILE>
 Context: activity-base PR #<pr-id> '<pr-title>' was merged (commit <commit-id>). Build is already passing. nuget.config is already credential-injected — do not modify or restore it.
@@ -124,7 +150,7 @@ Merged by: <merged-by>"
 git push origin feat/activity-base-<short-sha>
 ```
 
-**On failure** → spawn `slack-notifier` with `pr_url=""` and `msg="❌ <name>: push failed — <error-summary>. No PR created."` → `rm -rf /tmp/<name>` → next activity.
+**On failure** → **[SLACK]** `PR_URL=""` `MSG="❌ <name>: push failed — <error-summary>. No PR created."` → `rm -rf /tmp/<name>` → next activity.
 
 ### H. Create PR via ADO REST API
 
@@ -158,9 +184,9 @@ The generated PR description must include:
 - What changed in ams-activity-base (PR title + ID)
 - Build status: succeeded / failed at stage `<stage>` after `<n>` attempts (list error classes if failed)
 - Test status: passed / failed after `<n>` cycles / skipped (reason)
-- Files modified by sub-agents (if any)
+- Files modified by skills (if any)
 
-### I. Slack notification + clean up (delegate to slack-notifier)
+### I. Slack notification + clean up
 
 Determine the outcome message:
 
@@ -171,15 +197,7 @@ Determine the outcome message:
 | build ⚠️ (PR created) | `⚠️ <name>: Activity Base update PR created — build failures, manual fixes needed` |
 | PR creation failed | `❌ <name>: PR creation failed — <api-error-message>` |
 
-Spawn `slack-notifier` via Task:
-
-```
-Send a Slack notification.
-pr_url: <PR_WEB_URL>
-msg: <determined message above>
-```
-
-Log the returned JSON (sent status, HTTP code, attempts).
+**[SLACK]** `PR_URL=<PR_WEB_URL>` `MSG=<determined message above>`
 
 ```bash
 rm -rf /tmp/<name>
@@ -187,10 +205,6 @@ rm -rf /tmp/<name>
 
 ## Final Summary
 
-After all activities are processed, spawn `slack-notifier` via Task:
+After all activities are processed:
 
-```
-Send a Slack summary notification.
-pr_url: 
-msg: *Activity-base update complete*\nTriggered by PR #<pr-id>: <pr-title>\n• ✅ <n-success> succeeded\n• ⚠️ <n-issues> PRs with issues\n• ❌ <n-skipped> skipped
-```
+**[SLACK]** `PR_URL=""` `MSG="*Activity-base update complete*\nTriggered by PR #<pr-id>: <pr-title>\n• ✅ <n-success> succeeded\n• ⚠️ <n-issues> PRs with issues\n• ❌ <n-skipped> skipped"`

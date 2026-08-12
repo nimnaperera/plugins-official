@@ -1,6 +1,6 @@
 {
   "name": "activity-updater",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Propagates ams-activity-base submodule changes across all registered activity services. Updates submodules, fixes build errors (up to 10 retries), fixes/writes tests, creates ADO PRs, and posts Slack notifications.",
   "author": {
     "name": "Amili SEND",
@@ -9,9 +9,8 @@
   "license": "MIT",
   "keywords": ["submodule", "activity-base", "dotnet", "azure-devops", "automation"],
   "commands": ["./commands/activity-update.md"],
-  "agents": [
-    "./agents/build-fixer.md",
-    "./agents/test-fixer.md",
-    "./agents/slack-notifier.md"
+  "skills": [
+    "./skills/build-fixer",
+    "./skills/test-fixer"
   ]
 }
