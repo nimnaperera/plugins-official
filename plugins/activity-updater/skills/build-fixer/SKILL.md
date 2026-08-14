@@ -65,23 +65,30 @@ If this fails → return:
 
 Run with the Bash tool's `timeout` set to `600000`. The 2-minute default kills a cold restore mid-flight, which then looks like a restore failure rather than a budget problem.
 
-`--disable-parallel` is mandatory, not a retry escalation. Observed against the Compello feed: a parallel restore on a cold cache stalled past the full 10-minute budget and was killed, while an immediate retry with `--disable-parallel` completed. The feed leaves parallel requests hanging rather than failing them, so serialising is faster in wall-clock terms.
+Try plain first — fastest on a warm cache, which is the common case:
 
-`--locked-mode` is the fast path — every project ships a `packages.lock.json`, so restore comes straight from the lock without dependency resolution.
+```bash
+dotnet restore "<solution-file>" -p:Platform="Any CPU" 2>&1
+```
+
+If that fails or is killed by the timeout, fall back to the known-good combination:
 
 ```bash
 dotnet restore "<solution-file>" -p:Platform="Any CPU" --locked-mode --disable-parallel 2>&1
 ```
 
-Retry as separate Bash calls, keeping `--disable-parallel` on all of them:
+Observed against the Compello feed: a cold-cache parallel restore stalled past the full 10-minute budget and was killed, while the immediate `--disable-parallel` retry completed. The feed leaves parallel requests hanging rather than failing them, so serialising avoids connections that never finish. `--locked-mode` restores straight from each `packages.lock.json`, skipping dependency resolution.
 
-1. as above
-2. drop `--locked-mode` — required on `NU1004` (the bump changed a package version, so the lock must be updated and committed), harmless otherwise
-3. add `-v n` so the stalling package or source is named
+Ladder, each a separate Bash call:
 
-A timed-out attempt resumes from a warmer cache, so retrying is worthwhile rather than futile. Never add `--no-cache` or `--force` — both discard the cache the retry depends on.
+1. no extra flags
+2. `--locked-mode --disable-parallel` — attempt 1 failed or timed out
+3. `--disable-parallel` — attempt 2 reported `NU1004` (the bump changed a package version; the updated lock file must be committed)
+4. `--disable-parallel -v n` — names the stalling package or source
 
-If exit code non-zero after 3 attempts → return:
+A first-attempt timeout on a cold cache is expected, not a failure: finished downloads persist in `NUGET_PACKAGES`, so the fallback resumes from a warmer cache. Never add `--no-cache` or `--force` — both discard the cache the fallback depends on.
+
+If exit code non-zero after 4 attempts → return:
 ```json
 {"status": "failed", "stage": "restore", "attempts": 0, "files_modified": [], "restore_failed": true, "error_summary": "<restore error output>"}
 ```
